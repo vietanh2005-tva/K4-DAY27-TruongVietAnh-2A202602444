@@ -1,5 +1,10 @@
 # Day27 — Track 3: HITL PR Review Agent
 
+This personal repository contains the completed four exercises, Streamlit UI,
+and all four bonus challenges. See [SOLUTION.md](SOLUTION.md) for the current
+setup, verification commands, dry-run behavior, and bonus usage. The original
+assignment below is retained for context.
+
 A 2-hour lab that builds a human-in-the-loop pull-request review agent in **LangGraph**, end-to-end.
 
 > 1. Agent reads a PR, analyzes code changes, proposes review comments.

@@ -1,6 +1,6 @@
 """Exercise 3 — Escalation branch with reviewer Q&A.
 
-When confidence < 60%, the agent doesn't ask approve/reject — it asks specific
+When confidence < ESCALATE_THRESHOLD, the agent doesn't ask approve/reject — it asks specific
 clarifying questions and then synthesizes a refined review from the answers.
 """
 
@@ -18,6 +18,7 @@ from rich.panel import Panel
 
 from common.github import fetch_pr, post_review_comment
 from common.llm import get_llm
+from exercises.review_helpers import SYSTEM_PROMPT, review_messages, validate_answers, validate_choice
 from common.schemas import (
     AUTO_APPROVE_THRESHOLD,
     ESCALATE_THRESHOLD,
@@ -43,9 +44,7 @@ def node_analyze(state):
     with console.status("[dim]LLM reviewing the diff...[/dim]"):
         analysis = llm.invoke([
             {"role": "system", "content": (
-                "Senior reviewer. Structured output. "
-                # TODO: add an instruction: if confidence < 60%, populate escalation_questions
-                # with 2–4 specific, context-rich questions (reference which file/section in the diff).
+                SYSTEM_PROMPT
             )},
             {"role": "user", "content": f"Title: {state['pr_title']}\nDiff:\n{state['pr_diff']}"},
         ])
@@ -68,25 +67,19 @@ def node_escalate(state: ReviewState) -> dict:
     a = state["analysis"]
     questions = a.escalation_questions
     if not questions:
-        # fallback when the LLM didn't generate any questions
         questions = ["What is the intent of this PR?", "Any migration concerns?"]
 
-    # TODO: call interrupt(payload) where payload kind="escalation" contains:
-    #       pr_url, confidence, confidence_reasoning, summary, risk_factors, questions.
-    # answers = interrupt({...})
-    # return {"escalation_answers": answers}
-    raise NotImplementedError("Call interrupt() with an escalation payload")
+    answers = interrupt(dict(kind='escalation', pr_url=state['pr_url'],
+        confidence=a.confidence, confidence_reasoning=a.confidence_reasoning,
+        summary=a.summary, risk_factors=a.risk_factors, questions=questions))
+    return {'escalation_answers': validate_answers(answers, questions)}
 
 
 def node_synthesize(state: ReviewState) -> dict:
     """Re-prompt LLM with the reviewer's answers and produce a refined review."""
-    # TODO:
-    #   - read state["escalation_answers"] (dict[question, answer])
-    #   - call get_llm().with_structured_output(PRAnalysis).invoke(...) with a prompt
-    #     containing the original diff + initial analysis + Q&A.
-    #   - return {"analysis": refined}
-    # `node_commit` will then post the refined review to the PR.
-    raise NotImplementedError("Synthesize a refined PRAnalysis using the reviewer answers")
+    refined = get_llm().with_structured_output(PRAnalysis).invoke(
+        review_messages(state, state.get('escalation_answers') or {}))
+    return {'analysis': refined}
 
 
 def node_human_approval(state):
@@ -98,7 +91,7 @@ def node_human_approval(state):
         "comments": [c.model_dump() for c in a.comments],
         "diff_preview": state["pr_diff"][:2000],
     })
-    return {"human_choice": response.get("choice"), "human_feedback": response.get("feedback")}
+    return validate_choice(response)
 
 
 def _render_comment_body(state) -> str:
@@ -127,9 +120,9 @@ def _post(state, label: str) -> str:
 
 def node_commit(state):
     console.print("[cyan]→ commit[/cyan]")
-    # Two paths converge here:
-    #   1. human_approval → commit (only post if approved)
-    #   2. escalate → synthesize → commit (always post the refined review)
+    if state.get('human_choice') == 'edit':
+        refined = get_llm().with_structured_output(PRAnalysis).invoke(review_messages(state, state['human_feedback']))
+        return {'analysis': refined, 'final_action': _post({**state, 'analysis': refined}, 'committed_after_edit')}
     if state.get("escalation_answers"):
         return {"final_action": _post(state, "committed_after_escalation")}
     if state.get("human_choice") == "approve":
@@ -161,7 +154,8 @@ def build_graph():
     g.add_edge("auto_approve", END)
     g.add_edge("human_approval", "commit")
     g.add_edge("commit", END)
-    # TODO: wire escalate → synthesize → commit  (commit already → END)
+    g.add_edge('escalate', 'synthesize')
+    g.add_edge('synthesize', 'commit')
     return g.compile(checkpointer=MemorySaver())
 
 
